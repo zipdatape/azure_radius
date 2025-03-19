@@ -1,0 +1,131 @@
+import { config } from "dotenv"
+config()
+import radius from "radius"
+import dgram from "dgram"
+import { ClientSecretCredential } from "@azure/identity"
+import { Client } from "@microsoft/microsoft-graph-client"
+import { TokenCredentialAuthenticationProvider } from "@microsoft/microsoft-graph-client/authProviders/azureTokenCredentials/index.js"
+
+const server = dgram.createSocket("udp4")
+
+// Get environment variables with validation
+const getRequiredEnvVar = (name) => {
+  const value = process.env[name]
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
+  return value
+}
+
+const tenantId = getRequiredEnvVar("AZURE_TENANT_ID")
+const clientId = getRequiredEnvVar("AZURE_CLIENT_ID")
+const clientSecret = getRequiredEnvVar("AZURE_CLIENT_SECRET")
+const secret = getRequiredEnvVar("RADIUS_SECRET")
+
+class RadiusServer {
+  constructor() {
+    this.validateConfig()
+    this.graphClient = this.initializeGraphClient()
+  }
+
+  validateConfig() {
+    if (!tenantId || !clientId || !clientSecret) {
+      throw new Error("Missing required Azure AD credentials. Please check your environment variables.")
+    }
+  }
+
+  initializeGraphClient() {
+    try {
+      const credential = new ClientSecretCredential(tenantId, clientId, clientSecret)
+
+      const authProvider = new TokenCredentialAuthenticationProvider(credential, {
+        scopes: ["https://graph.microsoft.com/.default"],
+      })
+
+      return Client.initWithMiddleware({
+        authProvider: authProvider,
+      })
+    } catch (error) {
+      console.error("Error initializing Graph client:", error)
+      throw error
+    }
+  }
+
+  async start() {
+    server.on("message", this.onMessageReceived.bind(this))
+
+    server.on("listening", () => {
+      const address = server.address()
+      console.log(`radius server listening ${address.address}:${address.port}`)
+    })
+
+    await new Promise(() => server.bind(process.env.PORT || 1812))
+  }
+
+  async onMessageReceived(msg, rinfo) {
+    const packet = radius.decode({ secret, packet: msg })
+
+    if (packet.code !== "Access-Request") {
+      console.log(new Date().toJSON(), "unknown packet type: ", packet.code)
+      return
+    }
+
+    const username = packet.attributes["User-Name"]
+    const password = packet.attributes["User-Password"]
+
+    try {
+      const authResult = await this.authenticateUser(username, password)
+      const responseCode = authResult.success ? "Access-Accept" : "Access-Reject"
+      const response = radius.encode_response({
+        code: responseCode,
+        packet: packet,
+        secret: secret,
+      })
+
+      console.log(new Date().toJSON(), username, authResult.message)
+
+      server.send(response, 0, response.length, rinfo.port, rinfo.address, (err) => {
+        if (err) {
+          console.log(new Date().toJSON(), username, "Error sending response", rinfo)
+        }
+      })
+    } catch (error) {
+      console.error(new Date().toJSON(), username, "Authentication error:", error)
+      const response = radius.encode_response({
+        code: "Access-Reject",
+        packet: packet,
+        secret: secret,
+      })
+      server.send(response, 0, response.length, rinfo.port, rinfo.address)
+    }
+  }
+
+  async authenticateUser(username, password) {
+    try {
+      // Verify if the user exists in Azure AD
+      const user = await this.graphClient.api(`/users/${username}`).select("userPrincipalName,accountEnabled,id").get()
+
+      if (!user.accountEnabled) {
+        return { success: false, message: "❌ authentication failed: Account is disabled" }
+      }
+
+      // For security purposes in a production environment, you should implement proper password validation
+      // This is a simplified example that checks if the user exists and is enabled
+      if (user.userPrincipalName.toLowerCase() === username.toLowerCase()) {
+        return { success: true, message: "✅ authenticated successfully" }
+      }
+
+      return { success: false, message: "❌ authentication failed: Invalid credentials" }
+    } catch (error) {
+      console.error("Error during authentication:", error)
+      if (error.code === "Request_ResourceNotFound") {
+        return { success: false, message: "❌ authentication failed: User not found" }
+      }
+      return { success: false, message: "❌ authentication failed: " + error.message }
+    }
+  }
+}
+
+export default RadiusServer
+
+

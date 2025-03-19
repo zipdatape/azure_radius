@@ -1,0 +1,21 @@
+version: '3'
+services:
+  radius:
+    build: .
+    container_name: prd_desarrollo
+    env_file:
+      - .env
+    ports:
+      - "1812:1812/udp"
+    environment:
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - RADIUS_SECRET=${RADIUS_SECRET}
+      - PORT=${PORT}
+      - DEBUG=*
+    networks:
+      - app-network
+networks:
+  app-network:
+    external: true
