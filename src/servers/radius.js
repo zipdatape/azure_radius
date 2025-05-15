@@ -29,21 +29,29 @@ const tenantId = getRequiredEnvVar("AZURE_TENANT_ID")
 const clientId = getRequiredEnvVar("AZURE_CLIENT_ID")
 const clientSecret = getRequiredEnvVar("AZURE_CLIENT_SECRET")
 const secret = getRequiredEnvVar("RADIUS_SECRET")
+const radiusServerId = getRequiredEnvVar("RADIUS_SERVER_ID")
 
 // Dominio por defecto
-const DEFAULT_DOMAIN = "gamutvisual.pe"
+const DEFAULT_DOMAIN = getRequiredEnvVar("DEFAULT_DOMAIN")
 
 class RadiusServer {
   constructor() {
     this.validateConfig()
     this.graphClient = this.initializeGraphClient()
-    this.tokenCache = new Map()
+    // IMPORTANTE: Eliminar completamente el caché
+    // this.tokenCache = new Map()
   }
 
   validateConfig() {
     if (!tenantId || !clientId || !clientSecret) {
       throw new Error("Missing required Azure AD credentials. Please check your environment variables.")
     }
+
+    if (!radiusServerId) {
+      throw new Error("Missing RADIUS_SERVER_ID environment variable.")
+    }
+
+    logger.info(`RADIUS server configured with ID: ${radiusServerId}`)
   }
 
   initializeGraphClient() {
@@ -77,7 +85,7 @@ class RadiusServer {
 
     server.on("listening", () => {
       const address = server.address()
-      logger.info(`RADIUS server listening ${address.address}:${address.port}`)
+      logger.info(`RADIUS server (ID: ${radiusServerId}) listening ${address.address}:${address.port}`)
       logger.info(`Auto-appending domain @${DEFAULT_DOMAIN} for usernames without domain`)
     })
 
@@ -127,19 +135,23 @@ class RadiusServer {
 
   async authenticateUser(username, password) {
     try {
-      // Primero, verificar si el usuario está en la lista de permitidos
+      // Primero, verificar si el usuario está permitido para este servidor RADIUS específico
       const isAllowed = await isUserAllowed(username)
-      if (!isAllowed) {
-        return { success: false, message: "❌ authentication failed: User not allowed" }
-      }
 
-      // Check token cache first
-      if (this.tokenCache.has(username)) {
-        const cachedToken = this.tokenCache.get(username)
-        if (cachedToken.expiresOn > Date.now()) {
-          return { success: true, message: "✅ authenticated successfully (cached)" }
+      // Añadir logging detallado para depuración
+      logger.info(
+        `Checking if user ${username} is allowed for RADIUS server ID ${radiusServerId}: ${isAllowed ? "YES" : "NO"}`,
+      )
+
+      if (!isAllowed) {
+        return {
+          success: false,
+          message: `❌ authentication failed: User not allowed for RADIUS server ID ${radiusServerId}`,
         }
       }
+
+      // IMPORTANTE: ELIMINAR COMPLETAMENTE EL CÓDIGO DE CACHÉ
+      // NO usar comentarios, eliminar el código por completo
 
       // Verify if the user exists in Azure AD
       const user = await this.graphClient.api(`/users/${username}`).select("userPrincipalName,accountEnabled,id").get()
@@ -149,11 +161,7 @@ class RadiusServer {
       }
 
       if (user.userPrincipalName.toLowerCase() === username.toLowerCase()) {
-        // Cache the token
-        this.tokenCache.set(username, {
-          token: "dummy-token",
-          expiresOn: Date.now() + 3600000, // 1 hour expiration
-        })
+        // IMPORTANTE: NO almacenar en caché el resultado
         return { success: true, message: "✅ authenticated successfully" }
       }
 
@@ -169,5 +177,3 @@ class RadiusServer {
 }
 
 export default RadiusServer
-
-
