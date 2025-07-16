@@ -99,8 +99,51 @@ class RadiusServer {
       return username
     }
     
-    // Si no incluye @, usar el primer dominio por defecto
-    return `${username}@${ALLOWED_DOMAINS[0]}`
+    // Si no incluye @, retornar el username sin dominio para validación múltiple
+    return username
+  }
+
+  // ✅ NUEVA FUNCIÓN: Validar con múltiples dominios
+  async validateWithMultipleDomains(rawUsername, password) {
+    // Si el username ya incluye @, validar solo con ese dominio
+    if (rawUsername.includes("@")) {
+      const result = await this.validateCredentials(rawUsername, password)
+      return { success: result.success, message: result.message, username: rawUsername }
+    }
+
+    // Si no incluye @, intentar con cada dominio configurado
+    for (const domain of ALLOWED_DOMAINS) {
+      const formattedUsername = `${rawUsername}@${domain}`
+      logger.info(`Trying validation with domain ${domain}: ${formattedUsername}`)
+      
+      try {
+        const result = await this.validateCredentials(formattedUsername, password)
+        
+        if (result.success) {
+          logger.info(`✅ Validation successful with domain ${domain}`)
+          return { 
+            success: true, 
+            message: result.message, 
+            username: formattedUsername,
+            domain: domain 
+          }
+        } else {
+          logger.debug(`❌ Validation failed with domain ${domain}: ${result.message}`)
+          // Continuar con el siguiente dominio
+        }
+      } catch (error) {
+        logger.debug(`Error validating with domain ${domain}: ${error.message}`)
+        // Continuar con el siguiente dominio
+      }
+    }
+
+    // Si llegamos aquí, ningún dominio funcionó
+    logger.warn(`All domain validations failed for username: ${rawUsername}`)
+    return { 
+      success: false, 
+      message: "❌ validation failed: User not found in any allowed domain",
+      username: rawUsername 
+    }
   }
 
   async start() {
@@ -110,7 +153,7 @@ class RadiusServer {
       const address = server.address()
       logger.info(`RADIUS server listening ${address.address}:${address.port}`)
       logger.info(`Allowed domains: ${ALLOWED_DOMAINS.join(", ")}`)
-      logger.info(`Auto-appending domain @${ALLOWED_DOMAINS[0]} for usernames without domain`)
+      logger.info(`✅ Multi-domain validation enabled - will try all domains for usernames without @`)
       logger.info(`✅ Using credential validation mode (no full authentication required)`)
     })
 
@@ -129,8 +172,8 @@ class RadiusServer {
     const formattedUsername = this.formatUsername(rawUsername)
     const password = packet.attributes["User-Password"]
 
-    // Verificar si el dominio está permitido
-    if (!formattedUsername) {
+    // Verificar si el dominio está permitido (solo si ya incluye @)
+    if (rawUsername.includes("@") && !formattedUsername) {
       logger.warn(`Domain not allowed for username: ${rawUsername}`)
       const response = radius.encode_response({
         code: "Access-Reject",
@@ -141,11 +184,12 @@ class RadiusServer {
       return
     }
 
-    logger.info(`Login attempt - Raw username: ${rawUsername}, Formatted username: ${formattedUsername}`)
+    logger.info(`Login attempt - Raw username: ${rawUsername}, Will try multiple domains if needed`)
 
-    // Rate limiting check
-    if (this.isRateLimited(formattedUsername)) {
-      logger.warn(`Rate limited authentication attempt for ${formattedUsername}`)
+    // Rate limiting check (usar username sin dominio para rate limiting)
+    const rateLimitUsername = rawUsername.includes("@") ? rawUsername : `${rawUsername}@${ALLOWED_DOMAINS[0]}`
+    if (this.isRateLimited(rateLimitUsername)) {
+      logger.warn(`Rate limited authentication attempt for ${rateLimitUsername}`)
       const response = radius.encode_response({
         code: "Access-Reject",
         packet: packet,
@@ -156,13 +200,14 @@ class RadiusServer {
     }
 
     try {
-      const authResult = await this.validateCredentials(formattedUsername, password)
+      // ✅ Usar validación múltiple de dominios
+      const authResult = await this.validateWithMultipleDomains(rawUsername, password)
       const responseCode = authResult.success ? "Access-Accept" : "Access-Reject"
 
       if (!authResult.success) {
-        this.recordFailedAttempt(formattedUsername)
+        this.recordFailedAttempt(rateLimitUsername)
       } else {
-        this.clearFailedAttempts(formattedUsername)
+        this.clearFailedAttempts(rateLimitUsername)
       }
 
       const response = radius.encode_response({
@@ -171,7 +216,9 @@ class RadiusServer {
         secret: secret,
       })
 
-      logger.info(`Validation result for ${formattedUsername}: ${authResult.message}`)
+      const logUsername = authResult.username || formattedUsername
+      const domainInfo = authResult.domain ? ` (domain: ${authResult.domain})` : ""
+      logger.info(`Validation result for ${logUsername}: ${authResult.message}${domainInfo}`)
 
       server.send(response, 0, response.length, rinfo.port, rinfo.address, (err) => {
         if (err) {
@@ -179,8 +226,8 @@ class RadiusServer {
         }
       })
     } catch (error) {
-      logger.error(`Validation error for ${formattedUsername}:`, error)
-      this.recordFailedAttempt(formattedUsername)
+      logger.error(`Validation error for ${rawUsername}:`, error)
+      this.recordFailedAttempt(rateLimitUsername)
       const response = radius.encode_response({
         code: "Access-Reject",
         packet: packet,
