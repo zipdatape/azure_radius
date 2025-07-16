@@ -32,8 +32,23 @@ const clientId = getRequiredEnvVar("AZURE_CLIENT_ID")
 const clientSecret = getRequiredEnvVar("AZURE_CLIENT_SECRET")
 const secret = getRequiredEnvVar("RADIUS_SECRET")
 
-// Dominio por defecto
-const DEFAULT_DOMAIN = "globalhitss.com"
+// Dominios permitidos - leer desde variables de entorno
+const getAllowedDomains = () => {
+  // Si ALLOWED_DOMAINS está definido, usarlo
+  if (process.env.ALLOWED_DOMAINS) {
+    return process.env.ALLOWED_DOMAINS.split(',').map(domain => domain.trim())
+  }
+  
+  // Si DEFAULT_DOMAIN está definido, usarlo como único dominio
+  if (process.env.DEFAULT_DOMAIN) {
+    return [process.env.DEFAULT_DOMAIN]
+  }
+  
+  // Fallback por defecto
+  return ["globalhitss.com"]
+}
+
+const ALLOWED_DOMAINS = getAllowedDomains()
 
 class RadiusServer {
   constructor() {
@@ -74,10 +89,18 @@ class RadiusServer {
   }
 
   formatUsername(username) {
+    // Si ya incluye @, verificar que el dominio esté permitido
     if (username.includes("@")) {
+      const domain = username.split("@")[1]
+      if (!ALLOWED_DOMAINS.includes(domain)) {
+        logger.warn(`Domain ${domain} not in allowed list for username ${username}`)
+        return null // Retornar null para indicar dominio no permitido
+      }
       return username
     }
-    return `${username}@${DEFAULT_DOMAIN}`
+    
+    // Si no incluye @, usar el primer dominio por defecto
+    return `${username}@${ALLOWED_DOMAINS[0]}`
   }
 
   async start() {
@@ -86,7 +109,8 @@ class RadiusServer {
     server.on("listening", () => {
       const address = server.address()
       logger.info(`RADIUS server listening ${address.address}:${address.port}`)
-      logger.info(`Auto-appending domain @${DEFAULT_DOMAIN} for usernames without domain`)
+      logger.info(`Allowed domains: ${ALLOWED_DOMAINS.join(", ")}`)
+      logger.info(`Auto-appending domain @${ALLOWED_DOMAINS[0]} for usernames without domain`)
       logger.info(`✅ Using credential validation mode (no full authentication required)`)
     })
 
@@ -104,6 +128,18 @@ class RadiusServer {
     const rawUsername = packet.attributes["User-Name"]
     const formattedUsername = this.formatUsername(rawUsername)
     const password = packet.attributes["User-Password"]
+
+    // Verificar si el dominio está permitido
+    if (!formattedUsername) {
+      logger.warn(`Domain not allowed for username: ${rawUsername}`)
+      const response = radius.encode_response({
+        code: "Access-Reject",
+        packet: packet,
+        secret: secret,
+      })
+      server.send(response, 0, response.length, rinfo.port, rinfo.address)
+      return
+    }
 
     logger.info(`Login attempt - Raw username: ${rawUsername}, Formatted username: ${formattedUsername}`)
 
