@@ -65,6 +65,69 @@ find_available_port() {
     echo "$port"
 }
 
+# Función para limpiar contenedores antiguos
+limpiar_contenedores_antiguos() {
+    echo -e "\n${AZUL}=== Limpieza de Contenedores Antiguos ===${NC}"
+    
+    # Mostrar contenedores RADIUS existentes
+    contenedores_radius=$(docker ps -a --format "{{.Names}}" | grep -E "(radius|mesadecontrol)")
+    
+    if [ -z "$contenedores_radius" ]; then
+        echo -e "${VERDE}No hay contenedores RADIUS para limpiar.${NC}"
+        return 0
+    fi
+    
+    echo -e "${AMARILLO}Contenedores RADIUS encontrados:${NC}"
+    echo "$contenedores_radius" | while read -r contenedor; do
+        echo -e "  - ${contenedor}"
+    done
+    
+    echo -e "\n${AZUL}¿Desea eliminar contenedores antiguos? (s/n):${NC}"
+    read limpiar
+    
+    if [[ $limpiar == "s" || $limpiar == "S" ]]; then
+        echo "$contenedores_radius" | while read -r contenedor; do
+            show_status "Eliminando contenedor ${contenedor}" "ELIMINANDO"
+            docker stop "$contenedor" 2>/dev/null
+            docker rm "$contenedor" 2>/dev/null
+        done
+        show_status "Limpieza completada" "OK"
+    fi
+}
+
+# Función para actualizar contenedor existente
+actualizar_contenedor() {
+    local nombre_contenedor=$1
+    
+    echo -e "\n${AZUL}=== Actualizando Contenedor Existente ===${NC}"
+    
+    # Verificar si el contenedor existe
+    if ! docker ps -a --format "{{.Names}}" | grep -q "^${nombre_contenedor}$"; then
+        echo -e "${ROJO}El contenedor ${nombre_contenedor} no existe.${NC}"
+        return 1
+    fi
+    
+    # Detener contenedor
+    show_status "Deteniendo contenedor ${nombre_contenedor}" "DETENIENDO"
+    docker stop "${nombre_contenedor}"
+    
+    # Eliminar contenedor
+    show_status "Eliminando contenedor ${nombre_contenedor}" "ELIMINANDO"
+    docker rm "${nombre_contenedor}"
+    
+    # Reconstruir imagen
+    show_status "Reconstruyendo imagen (sin cache)" "CONSTRUYENDO"
+    cd "${nombre_contenedor}"
+    docker-compose build --no-cache
+    
+    # Iniciar contenedor
+    show_status "Iniciando contenedor actualizado" "INICIANDO"
+    docker-compose up -d
+    
+    show_status "Contenedor ${nombre_contenedor} actualizado" "OK"
+    cd ..
+}
+
 # Función para solicitar dominios
 solicitar_dominios() {
     local dominios=()
@@ -121,6 +184,54 @@ DEBUG_MODE="true"
 
 clear
 echo -e "${AZUL}=== Script de Configuración de Radius Automático ===${NC}\n"
+
+# Verificar si hay contenedores existentes
+contenedores_existentes=$(docker ps -a --format "{{.Names}}" | grep -E "(radius|mesadecontrol)" | head -5)
+
+if [ ! -z "$contenedores_existentes" ]; then
+    echo -e "${AMARILLO}Se encontraron contenedores RADIUS existentes:${NC}"
+    echo "$contenedores_existentes" | while read -r contenedor; do
+        echo -e "  - ${contenedor}"
+    done
+    
+    echo -e "\n${AZUL}¿Qué deseas hacer?${NC}"
+    echo -e "1. Crear un nuevo contenedor RADIUS"
+    echo -e "2. Actualizar un contenedor existente"
+    echo -e "3. Limpiar contenedores antiguos"
+    echo -e "4. Continuar con nueva instalación"
+    echo -e "${AZUL}Selecciona una opción (1, 2, 3 o 4):${NC}"
+    read opcion_instalacion
+    
+    case $opcion_instalacion in
+        2)
+            echo -e "${AZUL}Ingrese el nombre del contenedor a actualizar:${NC}"
+            read nombre_actualizar
+            actualizar_contenedor "$nombre_actualizar"
+            if [ $? -eq 0 ]; then
+                echo -e "\n${VERDE}Actualización completada exitosamente!${NC}"
+                echo -e "${AMARILLO}Para verificar el estado:${NC}"
+                echo -e "  docker logs ${nombre_actualizar}"
+                exit 0
+            else
+                echo -e "${ROJO}Error en la actualización. Continuando con nueva instalación...${NC}"
+                echo ""
+            fi
+            ;;
+        3)
+            limpiar_contenedores_antiguos
+            echo -e "\n${VERDE}Limpieza completada. Continuando con nueva instalación...${NC}"
+            echo ""
+            ;;
+        1|4)
+            echo -e "${VERDE}Continuando con nueva instalación...${NC}"
+            echo ""
+            ;;
+        *)
+            echo -e "${ROJO}Opción inválida. Continuando con nueva instalación...${NC}"
+            echo ""
+            ;;
+    esac
+fi
 
 # Verificar si el script se está ejecutando como root
 if [ "$EUID" -ne 0 ]; then
@@ -333,16 +444,37 @@ networks:
     external: true
 EOF
 
-# Iniciar contenedor radius
-show_status "Iniciando contenedor radius" "INICIANDO"
+# Construir imagen sin cache para asegurar versión actualizada
+show_status "Construyendo imagen radius (sin cache)" "CONSTRUYENDO"
 cd "$RADIUS_CONTAINER_NAME"
 debug "Directorio actual para Radius: $(pwd)"
+docker-compose build --no-cache
+if [ $? -ne 0 ]; then
+    show_status "Error al construir imagen Radius" "ERROR"
+    exit 1
+fi
+show_status "Imagen radius construida" "OK"
+
+# Iniciar contenedor radius
+show_status "Iniciando contenedor radius" "INICIANDO"
 docker-compose up -d
 if [ $? -ne 0 ]; then
     show_status "Error al iniciar contenedor Radius" "ERROR"
     exit 1
 fi
 show_status "Contenedor radius iniciado" "OK"
+
+# Verificar que el contenedor esté funcionando
+show_status "Verificando estado del contenedor" "VERIFICANDO"
+sleep 5
+
+if docker ps --format "{{.Names}}" | grep -q "^${RADIUS_CONTAINER_NAME}$"; then
+    show_status "Contenedor funcionando correctamente" "OK"
+else
+    show_status "Error: Contenedor no está ejecutándose" "ERROR"
+    echo -e "${ROJO}Revisa los logs con: docker logs ${RADIUS_CONTAINER_NAME}${NC}"
+    exit 1
+fi
 
 echo -e "\n${VERDE}Configuración completada exitosamente!${NC}"
 echo -e "${AMARILLO}Información de configuración:${NC}"
