@@ -2,13 +2,12 @@ import { config } from "dotenv"
 config()
 import radius from "radius"
 import dgram from "dgram"
-import { ClientSecretCredential } from "@azure/identity"
+import { ClientSecretCredential, UsernamePasswordCredential } from "@azure/identity"
 import { Client } from "@microsoft/microsoft-graph-client"
 import { TokenCredentialAuthenticationProvider } from "@microsoft/microsoft-graph-client/authProviders/azureTokenCredentials/index.js"
 import winston from "winston"
 import { isUserAllowed } from "../utils/allowedUsers.js"
 import crypto from "crypto"
-import { UsernamePasswordCredential } from "@azure/identity"
 
 const server = dgram.createSocket("udp4")
 
@@ -311,10 +310,10 @@ class RadiusServer {
     }
   }
 
-  // ✅ Validar contraseña usando método alternativo
+  // ✅ Validar contraseña usando método mejorado con Azure Identity v4
   async validatePasswordWithAzure(username, password) {
     try {
-      // Método 1: Intentar autenticación con scope mínimo
+      // Método 1: Intentar autenticación con scope mínimo usando Azure Identity v4
       const credential = new UsernamePasswordCredential(tenantId, clientId, username, password)
 
       // Usar scope mínimo para reducir requisitos de MFA
@@ -332,7 +331,8 @@ class RadiusServer {
       if (
         error.message.includes("AADSTS50076") ||
         error.message.includes("AADSTS50079") ||
-        error.message.includes("AADSTS50158")
+        error.message.includes("AADSTS50158") ||
+        error.message.includes("interaction_required")
       ) {
         logger.info(`MFA detected for ${username}, using alternative validation`)
         return await this.alternativePasswordValidation(username, password)
@@ -342,7 +342,8 @@ class RadiusServer {
       if (
         error.message.includes("AADSTS50126") ||
         error.message.includes("invalid_grant") ||
-        error.message.includes("Invalid username or password")
+        error.message.includes("Invalid username or password") ||
+        error.message.includes("AADSTS50034")
       ) {
         return { success: false, error: "Invalid username or password" }
       }

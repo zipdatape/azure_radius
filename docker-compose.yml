@@ -1,8 +1,10 @@
-version: '3'
+version: '3.8'
 services:
   radius:
-    build: .
-    container_name: prd_desarrollo
+    build: 
+      context: .
+      dockerfile: dockerfile
+    container_name: azure-radius-updated
     env_file:
       - .env
     ports:
@@ -12,10 +14,32 @@ services:
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
       - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
       - RADIUS_SECRET=${RADIUS_SECRET}
-      - PORT=${PORT}
-      - DEBUG=*
+      - PORT=1812
+      - NODE_ENV=production
+      - DEBUG=${DEBUG:-error,warn}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - app-network
+    volumes:
+      - radius_logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  radius_logs:
+
 networks:
   app-network:
     external: true
